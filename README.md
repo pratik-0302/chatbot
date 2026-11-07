@@ -21,6 +21,7 @@ Atlas AI provides several chatbot implementations: a basic conversational assist
 - [Testing](#testing)
 - [Contributing](#contributing)
 - [License](#license)
+- [Interview Preparation and Technical Q&A](#interview-preparation-and-technical-qa)
 - [Assumptions](#assumptions)
 
 ## Overview
@@ -33,7 +34,7 @@ The repository contains multiple independent entry points rather than one applic
 - The **Streamlit applications** demonstrate basic chat, SQLite checkpointing, tool calling, MCP integrations, streaming, and PDF RAG.
 - The default model integration is **Llama 3.2 through a locally running Ollama service**.
 
-The current web API does not select among model providers. It invokes the basic chatbot defined in `langgraph_backened.py`.
+The current web API does not select among model providers. It invokes the basic chatbot defined in `langgraph_backened.py`. The repository is branded **Atlas AI** in the application/README; the project may be referred to as **DocuFlow** in a CV or interview context.
 
 ## Key Features
 
@@ -146,7 +147,7 @@ sequenceDiagram
     User->>UI: Submit message
     UI->>Hook: send(thread_id, message)
     Hook->>API: POST /api/chat/stream
-    API->>API: Validate thread / attach stored file text if present
+    API->>API: Create thread metadata if missing / attach stored file text if present
     API->>Graph: stream(HumanMessage, thread_id)
     Graph->>CP: Load thread checkpoint
     CP-->>Graph: Previous messages (if available)
@@ -674,3 +675,161 @@ No `LICENSE` file is present in the repository. The project's license is therefo
 - The MCP local server path and remote server endpoint are environment-specific and must be confirmed/changed by the repository owner.
 - No screenshots, automated tests, or license file were found in the repository.
 - The repository's current code does not reveal a supported production deployment procedure; the commands above describe local development.
+
+
+## Interview Preparation and Technical Q&A
+
+This section is a revision guide for explaining the implementation accurately in a project interview. Answers describe the current repository; distinguish implemented behaviour from possible future improvements.
+
+### 1. Explain the project in 60–90 seconds
+
+> Atlas AI (referred to as DocuFlow in my CV) is a local-first chatbot project built with a Next.js frontend, a FastAPI backend, LangGraph orchestration, and the Llama 3.2 model served through Ollama. In the main web application, a user creates or selects a conversation thread, sends a message, and receives the model response incrementally through Server-Sent Events. LangGraph maintains message state using a message reducer and an in-memory checkpointer. The repository also contains separate Streamlit examples for SQLite-backed checkpointing, tool calling, MCP integration, and PDF question answering with FAISS-based retrieval. These are separate backend entry points rather than all being integrated into the main web application.
+
+### 2. Main web application: end-to-end flow
+
+The existing Request Flow sequence diagram above describes the main web path:
+
+1. The user submits a message in the Next.js page.
+2. The page calls the useChat hook, which calls the browser API helper.
+3. The helper sends POST /api/chat/stream with thread_id and message.
+4. FastAPI creates thread metadata if the ID is not already present, then calls chatbot.stream().
+5. LangGraph loads the thread checkpoint and invokes the chat node.
+6. The chat node sends message history to Ollama / Llama 3.2.
+7. LangGraph emits message chunks; FastAPI converts them into SSE token events and a final done event.
+8. The frontend parses each event and updates the assistant message incrementally.
+
+**Important implementation detail:** api.py imports chatbot from langgraph_backened.py. Therefore, this web request path uses the basic one-node graph with InMemorySaver; it does not call the SQLite, tool, MCP, or FAISS RAG backends.
+
+### 3. Core concepts to explain
+
+| Concept | What it means in this repository |
+|---|---|
+| StateGraph | Defines the graph workflow and its nodes/edges. |
+| ChatState | Typed state containing the messages list. |
+| add_messages | Reducer that merges new messages into the existing message state; it is not a database. |
+| chat_node | Sends the accumulated message history to ChatOllama and returns the assistant response. |
+| InMemorySaver | Stores LangGraph checkpoints in process memory; they are lost when that process stops. |
+| SqliteSaver | Alternative checkpointer used by the separate SQLite/tool/RAG examples; stores checkpoints in chatbot.db. |
+| thread_id | Identifies which conversation checkpoint LangGraph should load/update. It is not authentication or authorization. |
+| stream() | Streams graph output incrementally. In this code, it is used with stream_mode="messages". |
+| invoke() | Runs the graph and returns the completed result rather than exposing incremental output to the caller. |
+| SSE | Sends server-to-client events over an HTTP response. It is suitable when the main requirement is streaming generated text to the browser. |
+| Pydantic | Validates the structure and types of request data against a model. Additional constraints must be declared explicitly. |
+
+### 4. Frequently asked project questions
+
+#### Q1. Why did you use LangGraph instead of calling Ollama directly?
+
+LangGraph provides an explicit graph structure and state management. It is useful when a chatbot needs multi-step workflows, conditional routing, tool execution, or checkpointing. The current web graph is intentionally simple: START → chat_node → END. The repository's separate tool backend demonstrates conditional tool routing.
+
+#### Q2. What is the difference between add_messages and a checkpointer?
+
+add_messages is a state reducer. It combines incoming messages with the existing message list and handles message IDs. A checkpointer saves graph state snapshots. In this repository, InMemorySaver and SqliteSaver are checkpointer implementations. A reducer does not provide persistence by itself.
+
+#### Q3. What is the role of thread_id?
+
+The thread_id is passed in LangGraph's configurable runtime configuration. It tells the checkpointer which conversation state to retrieve and update. Different thread IDs keep graph checkpoints associated with different conversations. It does not verify who owns a thread; access control would need to be implemented separately.
+
+#### Q4. Does the main web app preserve conversations after a server restart?
+
+No. The main web app compiles its graph with InMemorySaver, and api.py also keeps thread metadata and uploaded file text in Python dictionaries. Those process-local structures are lost when the server restarts. The repository demonstrates SQLite checkpointing in separate backend modules, but that SQLite backend is not currently wired into api.py.
+
+#### Q5. How does streaming work?
+
+The frontend calls POST /api/chat/stream. The FastAPI endpoint returns a StreamingResponse with media type text/event-stream. It iterates over chatbot.stream(..., stream_mode="messages"), serializes message content as SSE token events, and sends a final done event. frontend/lib/api.ts reads the response body, parses data: lines, and calls the token/done/error callbacks. useChat.ts appends each received token to the assistant message in React state.
+
+#### Q6. What is the difference between SSE and WebSockets?
+
+SSE is a one-way server-to-client event stream over HTTP; the client can still send ordinary HTTP requests separately. WebSockets provide a persistent, full-duplex connection where both sides can send messages. SSE is a simpler fit when the requirement is primarily to stream LLM output from the server to the browser. WebSockets are useful for genuinely bidirectional real-time interactions.
+
+#### Q7. Why FastAPI?
+
+FastAPI provides Python API endpoints, request parsing and validation through Pydantic models, file-upload support, and streaming responses. In this project it exposes thread operations, file upload/removal, message retrieval, health checking, and chat streaming. HTTP methods such as GET and POST are HTTP standards, not features unique to FastAPI.
+
+#### Q8. What does Pydantic validate?
+
+Pydantic validates incoming data against a declared model: field presence, types, and explicitly configured constraints. For example, Field(min_length=1) can reject an empty string. The current ChatRequest in api.py declares message: str and thread_id: str but does **not** set a minimum length for message; therefore, do not claim that the current endpoint rejects an empty message through a min_length constraint. FastAPI commonly returns HTTP 422 when request validation fails.
+
+Pydantic validation is not authorization. Checking whether a user is allowed to access or delete a document requires separate authentication/authorization logic.
+
+#### Q9. Which HTTP methods are used?
+
+| Operation | Method | Reason |
+|---|---|---|
+| List threads | GET | Retrieve thread metadata |
+| Create thread | POST | Create a new thread |
+| Rename thread | PATCH | Partially update the thread name |
+| Delete thread | DELETE | Delete thread metadata |
+| Read messages | GET | Retrieve conversation messages |
+| Upload a file | POST | Submit file content |
+| Remove attached file | DELETE | Remove the attachment |
+| Send a chat message | POST | Submit a new message/action |
+
+#### Q10. Is the main web application's PDF upload a RAG pipeline?
+
+No. In api.py, the upload endpoint extracts PDF text using pypdf, truncates it to 60,000 characters, and stores it in _thread_files. On the next chat request, that text is prepended to the user prompt. This path does not chunk the document, create embeddings, store vectors, or retrieve relevant chunks.
+
+The separate langraph_rag_backend.py + streamlit_rag_frontend.py path implements PDF RAG using PyPDFLoader, RecursiveCharacterTextSplitter, OllamaEmbeddings, and FAISS.
+
+#### Q11. Explain the PDF RAG pipeline in the separate RAG example.
+
+1. Upload PDF bytes in the Streamlit interface.
+2. Save the bytes temporarily and load page documents with PyPDFLoader.
+3. Split pages using RecursiveCharacterTextSplitter with chunk_size=1000 and chunk_overlap=200 (character-based settings).
+4. Embed the chunks with OllamaEmbeddings(model="llama3.2").
+5. Build a FAISS vector store using FAISS.from_documents.
+6. Create a similarity retriever configured with k=4 and store it in a process-local dictionary keyed by thread ID.
+7. When the LLM calls rag_tool, retrieve relevant chunks and return their text and metadata.
+8. The tool result is added to graph messages; the LLM generates the final answer.
+
+The RAG graph also has search, calculator, and stock-price tools. The FAISS retriever is not persisted to disk by this implementation.
+
+#### Q12. What are chunk size and overlap?
+
+- **Chunk size** controls the approximate maximum text length in each chunk. Larger chunks provide more surrounding context but may reduce retrieval precision and increase prompt size.
+- **Overlap** repeats a portion of text between adjacent chunks. It can preserve context when a sentence or topic boundary falls near a chunk boundary, at the cost of additional duplicated text and embeddings.
+
+The current RAG source uses 1,000-character chunks and 200-character overlap, not 1,500 words.
+
+#### Q13. What are embeddings?
+
+Embeddings are numerical vectors representing text in a learned semantic space. The RAG backend uses OllamaEmbeddings(model="llama3.2") to embed document chunks and queries. Similarity search ranks stored vectors against the query vector. Vector dimensions and similarity metric should be confirmed from the selected embedding model/vector-store configuration rather than guessed.
+
+#### Q14. What does k=4 mean in the retriever?
+
+It requests up to four relevant documents/chunks from the retriever. It is the number of results returned, not the total number of vectors searched. The underlying vector store may use exact or approximate nearest-neighbour search depending on its index and configuration.
+
+#### Q15. RAG vs fine-tuning: what is the difference?
+
+RAG retrieves relevant external information at query time and supplies it as context to the LLM; it does not update the model weights. Fine-tuning updates model parameters (sometimes only selected adapter parameters) to adapt behaviour, style, or task performance. RAG is a natural fit for document collections that change or differ by user because documents can be re-indexed without retraining the LLM. The two approaches can also be combined.
+
+#### Q16. How would you support replacing or deleting an indexed PDF?
+
+This is a proposed improvement, not a currently implemented feature in the RAG backend. A robust design would assign a stable document_id, store it in each chunk's metadata, and delete all vectors associated with that ID before indexing a replacement. Then ingest the new PDF and create fresh chunks and embeddings. The current RAG example keeps one retriever per thread and does not expose a persistent document-level delete/replace workflow.
+
+#### Q17. What happens if the answer is not in the retrieved document?
+
+A RAG system can still hallucinate if the LLM answers from its pretrained knowledge. Possible improvements include a tuned retrieval similarity threshold, instructions to answer only from retrieved context, a clear fallback when evidence is insufficient, and evaluation of answers against source passages. These guardrails are design improvements; they should not be presented as already implemented unless verified.
+
+#### Q18. What are the main limitations and next steps?
+
+1. Wire a persistent SQLite (or production-grade) checkpointer into the main FastAPI application and persist thread metadata.
+2. Add authentication and per-user authorization for threads and uploaded files.
+3. Persist uploaded documents and vector indexes; support document replacement and deletion.
+4. Add file-size/type validation and safer PDF/text extraction.
+5. Move API credentials into environment variables, rotate any key previously committed to source, and add request timeouts/error handling.
+6. Add backend/API/RAG tests, structured logs, and retrieval/answer evaluation.
+7. Implement actual cancellation for the frontend's stop control and propagate cancellation to the backend stream.
+
+### 5. Be precise in an interview
+
+Use these distinctions to avoid overstating the implementation:
+
+- **Implemented in the main web path:** Next.js UI, FastAPI endpoints, basic LangGraph chat graph, Ollama Llama 3.2, in-memory graph checkpoints, thread metadata in memory, file-text prompt injection, and SSE streaming.
+- **Implemented as separate examples:** SQLite checkpointer, tool-calling graph, MCP-enabled graph, and FAISS PDF RAG with a Streamlit interface.
+- **Not currently implemented in the main web path:** durable SQLite-backed web conversations, vector-based PDF retrieval, authenticated multi-user isolation, persistent file/vector storage, and robust document replacement/deletion.
+- **Do not say:** "The main web app uses ChromaDB/BGE embeddings." The checked-in RAG source uses FAISS and OllamaEmbeddings(model="llama3.2").
+- **Do not say:** "Pydantic blocks empty messages in the current API." The current ChatRequest has no min_length constraint.
+- **Do not say:** "The SQLite checkpointer is used by the Next.js/FastAPI app." api.py imports the in-memory basic backend.
+
+For a strong project explanation, describe the architecture, trace one request end to end, explain one design decision, and discuss one limitation honestly.
